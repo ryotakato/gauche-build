@@ -1,0 +1,1 @@
+install_package "Gauche-0.8.14" "http://sourceforge.net/projects/gauche/files/Gauche/0.8.14/Gauche-0.8.14.tgz"

@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+#
+# Summary: Install a Gauche version using the gauche-build plugin
+#
+# Usage: gauenv install [-f|--force] [-k|--keep] [-v|--verbose] <version>
+#        gauenv install [-f|--force] [-k|--keep] [-v|--verbose] <definition-file>
+#        gauenv install -l|--list
+#
+#   -l/--list        List all available versions
+#   -f/--force       Install even if the version appears to be installed already
+#   -k/--keep        Keep source tree in $GAUENV_BUILD_ROOT after installation
+#                    (defaults to $GAUENV_ROOT/sources)
+#   -v/--verbose     Verbose mode: print compilation status to stdout
+#
+# For detailed information on installing Gauche versions with
+# gauche-build, including a list of environment variables for adjusting
+# compilation, see: https://github.com/ryotakato/gauche-build#usage
+#
+set -e
+[ -n "$GAUENV_DEBUG" ] && set -x
+
+# Provide gauenv completions
+if [ "$1" = "--complete" ]; then
+  exec gauche-build --definitions
+fi
+
+if [ -z "$GAUENV_ROOT" ]; then
+  GAUENV_ROOT="${HOME}/.gauenv"
+fi
+
+# Load shared library functions
+eval "$(gauche-build --lib)"
+
+usage() {
+  # We can remove the sed fallback once gauenv 0.1.0 is widely available.
+  gauenv-help install 2>/dev/null || sed -ne '/^#/!q;s/.//;s/.//;1,4d;p' < "$0"
+  [ -z "$1" ] || exit "$1"
+}
+
+definitions() {
+  local query="$1"
+  gauche-build --definitions | grep -F "$query" || true
+}
+
+indent() {
+  sed 's/^/  /'
+}
+
+unset FORCE
+unset KEEP
+unset VERBOSE
+
+parse_options "$@"
+for option in "${OPTIONS[@]}"; do
+  case "$option" in
+  "h" | "help" )
+    usage 0
+    ;;
+  "l" | "list" )
+    echo "Available versions:"
+    definitions | indent
+    exit
+    ;;
+  "f" | "force" )
+    FORCE=true
+    ;;
+  "k" | "keep" )
+    [ -n "${GAUENV_BUILD_ROOT}" ] || GAUENV_BUILD_ROOT="${GAUENV_ROOT}/sources"
+    ;;
+  "v" | "verbose" )
+    VERBOSE="-v"
+    ;;
+  "version" )
+    exec gauche-build --version
+    ;;
+  * )
+    usage 1
+    ;;
+  esac
+done
+
+unset VERSION_NAME
+
+# The first argument contains the definition to install. If the
+# argument is missing, try to install whatever local app-specific
+# version is specified by gauenv. Show usage instructions if a local
+# version is not specified.
+DEFINITION="${ARGUMENTS[0]}"
+[ -n "$DEFINITION" ] || DEFINITION="$(gauenv local 2>/dev/null || true)"
+[ -n "$DEFINITION" ] || usage 1
+
+
+# Define `before_install` and `after_install` functions that allow
+# plugin hooks to register a string of code for execution before or
+# after the installation process.
+declare -a before_hooks after_hooks
+
+before_install() {
+  local hook="$1"
+  before_hooks["${#before_hooks[@]}"]="$hook"
+}
+
+after_install() {
+  local hook="$1"
+  after_hooks["${#after_hooks[@]}"]="$hook"
+}
+
+# Load plugin hooks.
+for script in $(gauenv-hooks install); do
+  source "$script"
+done
+
+
+# Set VERSION_NAME from $DEFINITION, if it is not already set. Then
+# compute the installation prefix.
+[ -n "$VERSION_NAME" ] || VERSION_NAME="${DEFINITION##*/}"
+PREFIX="${GAUENV_ROOT}/versions/${VERSION_NAME}"
+
+[ -d "${PREFIX}" ] && PREFIX_EXISTS=1
+
+# If the installation prefix exists, prompt for confirmation unless
+# the --force option was specified.
+if [ -z "$FORCE" ] && [ -d "${PREFIX}/bin" ]; then
+  echo "gauenv: $PREFIX already exists" >&2
+  read -p "continue with installation? (y/N) "
+
+  case "$REPLY" in
+  y* | Y* ) ;;
+  * ) exit 1 ;;
+  esac
+fi
+
+# If GAUENV_BUILD_ROOT is set, always pass keep options to gauche-build.
+if [ -n "${GAUENV_BUILD_ROOT}" ]; then
+  export GAUCHE_BUILD_BUILD_PATH="${GAUENV_BUILD_ROOT}/${VERSION_NAME}"
+  KEEP="-k"
+fi
+
+# Set GAUCHE_BUILD_CACHE_PATH to $GAUENV_ROOT/cache, if the directory
+# exists and the variable is not already set.
+if [ -z "${GAUCHE_BUILD_CACHE_PATH}" ] && [ -d "${GAUENV_ROOT}/cache" ]; then
+  export GAUCHE_BUILD_CACHE_PATH="${GAUENV_ROOT}/cache"
+fi
+
+# Default GAUENV_VERSION to the globally-specified Gauche version. (The
+# REE installer requires an existing Gauche installation to run. An
+# unsatisfied local .gauche-version file can cause the installer to
+# fail.)
+export GAUENV_VERSION="$(gauenv global 2>/dev/null || true)"
+
+
+# Execute `before_install` hooks.
+for hook in "${before_hooks[@]}"; do eval "$hook"; done
+
+# Plan cleanup on unsuccessful installation.
+cleanup() {
+  [ -z "${PREFIX_EXISTS}" ] && rm -rf "$PREFIX"
+}
+
+trap cleanup SIGINT
+
+# Invoke `gauche-build` and record the exit status in $STATUS.
+STATUS=0
+gauche-build $KEEP $VERBOSE "$DEFINITION" "$PREFIX" || STATUS="$?"
+
+# Display a more helpful message if the definition wasn't found.
+if [ "$STATUS" == "2" ]; then
+  { candidates="$(definitions "$DEFINITION")"
+    if [ -n "$candidates" ]; then
+      echo
+      echo "The following versions contain \`$DEFINITION' in the name:"
+      echo "$candidates" | indent
+    fi
+    echo
+    echo "You can list all available versions with \`gauenv install --list'."
+    echo
+    echo "If the version you're looking for is not present, first try upgrading"
+    echo "gauche-build. If it's still missing, open a request on the gauche-build"
+    echo "issue tracker: https://github.com/ryotakato/gauche-build/issues"
+  } >&2
+fi
+
+# Execute `after_install` hooks.
+for hook in "${after_hooks[@]}"; do eval "$hook"; done
+
+# Run `gauenv-rehash` after a successful installation.
+if [ "$STATUS" == "0" ]; then
+  gauenv rehash
+else
+  cleanup
+fi
+
+exit "$STATUS"
