@@ -1,6 +1,8 @@
 gauche-build
 ============
 
+<span style="color: red; ">this repository is stopped maintenance. please Use other tool (ex. asdf)</span>
+
 this is gauenv plugin.
 You're able to install Gauche.
 
